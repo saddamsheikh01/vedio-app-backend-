@@ -22,7 +22,9 @@ Request body:
 
 Behavior:
 - Accepts normal page links and direct media links.
+- Expands common short/share links (TikTok, Instagram, Facebook watch, YouTube short links, etc.).
 - For difficult links, automatically falls back between formats (`mp4_hd -> mp4 -> mp3`).
+- For video formats, prefers direct progressive MP4 URLs (video + audio) when available.
 - Returns required request `headers` when platforms need Referer/User-Agent.
 
 Response example:

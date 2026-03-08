@@ -13,6 +13,21 @@ from yt_dlp import YoutubeDL
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("video-extractor-api")
 
+SHORTENER_HOSTS = {
+    "vt.tiktok.com",
+    "vm.tiktok.com",
+    "t.co",
+    "bit.ly",
+    "tinyurl.com",
+    "rb.gy",
+    "shorturl.at",
+    "instagram.com",
+    "www.instagram.com",
+    "l.instagram.com",
+    "fb.watch",
+    "youtu.be",
+}
+
 app = FastAPI(title="Video Extractor API", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
@@ -56,7 +71,7 @@ def _normalize_url(raw: str) -> str:
 
 def _expand_short_url(url: str) -> str:
     host = (urlparse(url).hostname or "").lower()
-    if host not in {"vt.tiktok.com", "vm.tiktok.com"}:
+    if host not in SHORTENER_HOSTS:
         return url
 
     req = urllib.request.Request(
@@ -72,7 +87,10 @@ def _expand_short_url(url: str) -> str:
     try:
         with urllib.request.urlopen(req, timeout=15) as response:
             redirected = response.geturl().strip()
-            return redirected or url
+            if not redirected:
+                return url
+            cleaned = redirected.split("#", 1)[0].strip()
+            return cleaned or url
     except (urllib.error.URLError, ValueError):
         return url
 
@@ -155,6 +173,45 @@ def _extract_with_fallback(url: str, format_name: str) -> tuple[dict[str, Any], 
     raise HTTPException(status_code=422, detail=last_error_message)
 
 
+def _protocol_rank(fmt: dict[str, Any]) -> int:
+    protocol = str(fmt.get("protocol") or "").lower()
+    if protocol.startswith("http") and "m3u8" not in protocol and "dash" not in protocol:
+        return 3
+    if protocol.startswith("https"):
+        return 3
+    if "m3u8" in protocol:
+        return 1
+    if "dash" in protocol:
+        return 1
+    if protocol:
+        return 2
+    return 0
+
+
+def _score_audio_format(fmt: dict[str, Any]) -> tuple[int, int, int]:
+    ext = str(fmt.get("ext") or "").lower()
+    vcodec = str(fmt.get("vcodec") or "none").lower()
+    acodec = str(fmt.get("acodec") or "none").lower()
+    abr = int(fmt.get("abr") or 0)
+    ext_rank = 2 if ext in {"m4a", "mp3"} else (1 if ext else 0)
+    audio_only_rank = 2 if vcodec in {"none", ""} and acodec not in {"none", ""} else 0
+    return (audio_only_rank, ext_rank, abr)
+
+
+def _score_video_format(fmt: dict[str, Any], format_name: str) -> tuple[int, int, int, int, int]:
+    ext = str(fmt.get("ext") or "").lower()
+    vcodec = str(fmt.get("vcodec") or "none").lower()
+    acodec = str(fmt.get("acodec") or "none").lower()
+    height = int(fmt.get("height") or 0)
+    tbr = int(fmt.get("tbr") or 0)
+
+    has_video = 1 if vcodec not in {"none", ""} else 0
+    has_audio = 1 if acodec not in {"none", ""} else 0
+    ext_rank = 3 if ext == "mp4" else (2 if ext in {"mkv", "webm", "mov"} else (1 if ext else 0))
+    hd_rank = 1 if (format_name == "mp4_hd" and height >= 720) else 0
+    return (has_video, has_audio, hd_rank, ext_rank, _protocol_rank(fmt) * 100000 + height * 100 + tbr)
+
+
 def _resolve_media_url(info: dict[str, Any], format_name: str) -> tuple[str, str]:
     direct_url = info.get("url")
     ext = (info.get("ext") or "").lower()
@@ -162,14 +219,33 @@ def _resolve_media_url(info: dict[str, Any], format_name: str) -> tuple[str, str
     formats = info.get("formats")
 
     if requested and isinstance(requested, list):
-        if format_name == "mp3":
-            for fmt in requested:
-                fmt_url = fmt.get("url")
-                if fmt_url:
-                    return fmt_url, (fmt.get("ext") or "m4a").lower()
-        for fmt in requested:
-            if fmt.get("vcodec") != "none" and fmt.get("url"):
-                return fmt["url"], (fmt.get("ext") or "mp4").lower()
+        requested_candidates = [f for f in requested if isinstance(f, dict) and f.get("url")]
+        if format_name == "mp3" and requested_candidates:
+            best_requested_audio = max(requested_candidates, key=_score_audio_format)
+            return best_requested_audio["url"], (best_requested_audio.get("ext") or "m4a").lower()
+        if requested_candidates:
+            requested_progressive = [
+                f
+                for f in requested_candidates
+                if str(f.get("vcodec") or "none").lower() not in {"none", ""}
+                and str(f.get("acodec") or "none").lower() not in {"none", ""}
+            ]
+            if requested_progressive:
+                best_requested_video = max(
+                    requested_progressive,
+                    key=lambda f: _score_video_format(f, format_name),
+                )
+                return best_requested_video["url"], (best_requested_video.get("ext") or "mp4").lower()
+
+            requested_video_only = [
+                f for f in requested_candidates if str(f.get("vcodec") or "none").lower() not in {"none", ""}
+            ]
+            if requested_video_only:
+                best_requested_video = max(
+                    requested_video_only,
+                    key=lambda f: _score_video_format(f, format_name),
+                )
+                return best_requested_video["url"], (best_requested_video.get("ext") or "mp4").lower()
 
     if formats and isinstance(formats, list):
         candidates: list[dict[str, Any]] = [f for f in formats if isinstance(f, dict) and f.get("url")]
@@ -180,20 +256,12 @@ def _resolve_media_url(info: dict[str, Any], format_name: str) -> tuple[str, str
                 if f.get("acodec") not in (None, "none") and f.get("vcodec") in (None, "none")
             ]
             if audio_only:
-                best_audio = max(audio_only, key=lambda f: f.get("abr") or 0)
+                best_audio = max(audio_only, key=_score_audio_format)
                 return best_audio["url"], (best_audio.get("ext") or "m4a").lower()
         else:
             video_candidates = [f for f in candidates if f.get("vcodec") not in (None, "none")]
-            if format_name == "mp4_hd":
-                hd_first = [f for f in video_candidates if (f.get("height") or 0) >= 720]
-                pool = hd_first or video_candidates
-            else:
-                pool = video_candidates
-            if pool:
-                best_video = max(
-                    pool,
-                    key=lambda f: ((f.get("height") or 0), (f.get("tbr") or 0), (f.get("filesize") or 0)),
-                )
+            if video_candidates:
+                best_video = max(video_candidates, key=lambda f: _score_video_format(f, format_name))
                 return best_video["url"], (best_video.get("ext") or "mp4").lower()
 
     if isinstance(direct_url, str) and direct_url:
