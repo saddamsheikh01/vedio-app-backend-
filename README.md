@@ -1,6 +1,6 @@
 # Video Extractor Backend (yt-dlp)
 
-This backend resolves social/video page links (TikTok, Instagram, Facebook, YouTube, etc.) into a direct media URL.
+This backend resolves most public social/video page links (TikTok, Instagram, Facebook, YouTube, etc.) into a direct media URL.
 
 ## API
 
@@ -19,6 +19,11 @@ Request body:
 - `mp3`
 - `mp4`
 - `mp4_hd`
+
+Behavior:
+- Accepts normal page links and direct media links.
+- For difficult links, automatically falls back between formats (`mp4_hd -> mp4 -> mp3`).
+- Returns required request `headers` when platforms need Referer/User-Agent.
 
 Response example:
 
@@ -100,4 +105,5 @@ After deploy:
 
 - Some platforms may require frequent `yt-dlp` updates.
 - Private/login-only content cannot be extracted without cookies/auth setup.
+- DRM-protected videos cannot be resolved as direct downloadable URLs.
 - Respect each platform's terms and local laws.
