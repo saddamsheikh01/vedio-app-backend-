@@ -95,6 +95,46 @@ def _expand_short_url(url: str) -> str:
         return url
 
 
+def _without_fragment(url: str) -> str:
+    return url.split("#", 1)[0].strip()
+
+
+def _tiktok_short_to_canonical(url: str) -> str | None:
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if host not in {"vt.tiktok.com", "vm.tiktok.com"}:
+        return None
+    path = parsed.path.strip("/")
+    if not path:
+        return None
+    short_code = path.split("/", 1)[0]
+    if not short_code:
+        return None
+    return f"https://www.tiktok.com/t/{short_code}/"
+
+
+def _candidate_source_urls(raw_url: str) -> list[str]:
+    candidates: list[str] = []
+
+    def _push(value: str | None) -> None:
+        if not value:
+            return
+        cleaned = _without_fragment(value)
+        if cleaned and cleaned not in candidates:
+            candidates.append(cleaned)
+
+    normalized = _normalize_url(raw_url)
+    _push(normalized)
+    _push(_tiktok_short_to_canonical(normalized))
+
+    expanded = _expand_short_url(normalized)
+    if expanded != normalized:
+        _push(expanded)
+        _push(_tiktok_short_to_canonical(expanded))
+
+    return candidates
+
+
 def _base_ydl_opts() -> dict[str, Any]:
     return {
         "quiet": True,
@@ -281,46 +321,61 @@ def health() -> dict[str, str]:
 @app.post("/api/resolve", response_model=ResolveResponse)
 def resolve_media(request: ResolveRequest) -> ResolveResponse:
     try:
-        source_url = _normalize_url(request.url)
-        if not _is_http_url(source_url):
+        normalized_input = _normalize_url(request.url)
+        if not _is_http_url(normalized_input):
             raise HTTPException(status_code=422, detail="Only HTTP/HTTPS URLs are supported.")
-        source_url = _expand_short_url(source_url)
+        source_candidates = _candidate_source_urls(normalized_input)
+        extraction_errors: list[str] = []
 
-        if _looks_like_direct_media_url(source_url):
-            guessed_ext = (
-                re.search(r"\.(mp4|m4a|mp3|webm|mkv|mov|wav)(?:\?|$)", source_url, re.IGNORECASE)
-                .group(1)
-                .lower()
-            )
-            return ResolveResponse(
-                source_url=source_url,
-                title="direct_media",
-                media_url=source_url,
-                media_ext=guessed_ext,
-                thumbnail=None,
-                duration=None,
-                extractor="direct",
-                requested_format=request.format,
-                headers={},
-            )
+        for source_url in source_candidates:
+            if _looks_like_direct_media_url(source_url):
+                guessed_ext = (
+                    re.search(r"\.(mp4|m4a|mp3|webm|mkv|mov|wav)(?:\?|$)", source_url, re.IGNORECASE)
+                    .group(1)
+                    .lower()
+                )
+                return ResolveResponse(
+                    source_url=source_url,
+                    title="direct_media",
+                    media_url=source_url,
+                    media_ext=guessed_ext,
+                    thumbnail=None,
+                    duration=None,
+                    extractor="direct",
+                    requested_format=request.format,
+                    headers={},
+                )
 
-        info, resolved_format = _extract_with_fallback(source_url, request.format)
-        media_url, media_ext = _resolve_media_url(info, resolved_format)
-        headers = info.get("http_headers") or {}
-        if not isinstance(headers, dict):
-            headers = {}
+            try:
+                info, resolved_format = _extract_with_fallback(source_url, request.format)
+                media_url, media_ext = _resolve_media_url(info, resolved_format)
+                headers = info.get("http_headers") or {}
+                if not isinstance(headers, dict):
+                    headers = {}
 
-        return ResolveResponse(
-            source_url=source_url,
-            title=(info.get("title") or "video").strip(),
-            media_url=media_url,
-            media_ext=media_ext,
-            thumbnail=info.get("thumbnail"),
-            duration=info.get("duration"),
-            extractor=info.get("extractor_key") or info.get("extractor"),
-            requested_format=resolved_format,
-            headers={str(k): str(v) for k, v in headers.items()},
-        )
+                return ResolveResponse(
+                    source_url=source_url,
+                    title=(info.get("title") or "video").strip(),
+                    media_url=media_url,
+                    media_ext=media_ext,
+                    thumbnail=info.get("thumbnail"),
+                    duration=info.get("duration"),
+                    extractor=info.get("extractor_key") or info.get("extractor"),
+                    requested_format=resolved_format,
+                    headers={str(k): str(v) for k, v in headers.items()},
+                )
+            except HTTPException as exc:
+                detail = str(exc.detail) if getattr(exc, "detail", None) else str(exc)
+                extraction_errors.append(f"{source_url} -> {detail}")
+                continue
+            except Exception as exc:  # noqa: BLE001
+                extraction_errors.append(f"{source_url} -> {exc}")
+                continue
+
+        detail_message = "Failed to resolve media URL from all candidate links."
+        if extraction_errors:
+            detail_message = f"{detail_message} Attempts: {' | '.join(extraction_errors)}"
+        raise HTTPException(status_code=422, detail=detail_message)
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
