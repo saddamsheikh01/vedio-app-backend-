@@ -1,6 +1,6 @@
 # Video Extractor Backend (yt-dlp)
 
-This backend resolves most public social/video page links (TikTok, Instagram, Facebook, YouTube, etc.) into a direct media URL.
+This backend resolves most public social/video page links (TikTok, Instagram, Facebook, YouTube, etc.) into direct downloadable media URLs for app usage.
 
 ## API
 
@@ -11,7 +11,8 @@ Request body:
 ```json
 {
   "url": "https://www.tiktok.com/@user/video/123",
-  "format": "mp4_hd"
+  "format": "mp4_hd",
+  "include_alternatives": true
 }
 ```
 
@@ -23,9 +24,10 @@ Request body:
 Behavior:
 - Accepts normal page links and direct media links.
 - Expands common short/share links (TikTok, Instagram, Facebook watch, YouTube short links, etc.).
-- For difficult links, automatically falls back between formats (`mp4_hd -> mp4 -> mp3`).
-- For video formats, prefers direct progressive MP4 URLs (video + audio) when available.
+- Tries multiple extraction profiles (mobile, desktop, relaxed fallback) automatically.
+- Falls back between formats (`mp4_hd -> mp4 -> mp3`) if required.
 - Returns required request `headers` when platforms need Referer/User-Agent.
+- Returns `app_download` object and `alternatives` list so app can retry without another API call.
 
 Response example:
 
@@ -35,6 +37,8 @@ Response example:
   "title": "My Video",
   "media_url": "https://....mp4",
   "media_ext": "mp4",
+  "filename": "My Video.mp4",
+  "mime_type": "video/mp4",
   "thumbnail": "https://....jpg",
   "duration": 12,
   "extractor": "TikTok",
@@ -42,7 +46,27 @@ Response example:
   "headers": {
     "User-Agent": "...",
     "Referer": "..."
-  }
+  },
+  "alternatives": [
+    {
+      "url": "https://....mp4",
+      "ext": "mp4",
+      "quality": "720p",
+      "height": 720,
+      "tbr": 1300
+    }
+  ],
+  "app_download": {
+    "method": "GET",
+    "url": "https://....mp4",
+    "headers": {
+      "User-Agent": "...",
+      "Referer": "..."
+    },
+    "filename": "My Video.mp4",
+    "mime_type": "video/mp4"
+  },
+  "warnings": []
 }
 ```
 
@@ -51,7 +75,12 @@ Response example:
 Returns:
 
 ```json
-{"status":"ok"}
+{
+  "status": "ok",
+  "api_version": "2.0.0",
+  "fastapi_version": "...",
+  "yt_dlp_version": "..."
+}
 ```
 
 ## Local Run
@@ -99,13 +128,27 @@ After deploy:
 ## Flutter Integration
 
 1. App sends original URL + selected format to `/api/resolve`.
-2. Backend returns `media_url`.
-3. App downloads `media_url` directly.
-4. Optionally pass returned `headers` in download request.
+2. App must use `app_download.url` and include `app_download.headers` in its HTTP request.
+3. Save using `app_download.filename` and `app_download.mime_type`.
+4. If download fails, retry with `alternatives[0].url`, then next entries.
 
 ## Notes
 
-- Some platforms may require frequent `yt-dlp` updates.
+- Some platforms require frequent `yt-dlp` updates.
 - Private/login-only content cannot be extracted without cookies/auth setup.
 - DRM-protected videos cannot be resolved as direct downloadable URLs.
 - Respect each platform's terms and local laws.
+
+## Maintenance
+
+Update `yt-dlp` regularly in the backend environment:
+
+```bash
+pip install -U yt-dlp
+```
+
+If using Docker, rebuild the image after updates:
+
+```bash
+docker build -t video-extractor-api .
+```
