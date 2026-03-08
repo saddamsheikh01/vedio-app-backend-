@@ -1,6 +1,9 @@
 import logging
 import re
+import urllib.error
+import urllib.request
 from typing import Any
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -49,6 +52,29 @@ def _normalize_url(raw: str) -> str:
     cleaned = raw.strip()
     cleaned = cleaned.split("#", 1)[0]
     return cleaned
+
+
+def _expand_short_url(url: str) -> str:
+    host = (urlparse(url).hostname or "").lower()
+    if host not in {"vt.tiktok.com", "vm.tiktok.com"}:
+        return url
+
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Linux; Android 13; Mobile) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Mobile Safari/537.36"
+            )
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as response:
+            redirected = response.geturl().strip()
+            return redirected or url
+    except (urllib.error.URLError, ValueError):
+        return url
 
 
 def _base_ydl_opts() -> dict[str, Any]:
@@ -191,6 +217,7 @@ def resolve_media(request: ResolveRequest) -> ResolveResponse:
         source_url = _normalize_url(request.url)
         if not _is_http_url(source_url):
             raise HTTPException(status_code=422, detail="Only HTTP/HTTPS URLs are supported.")
+        source_url = _expand_short_url(source_url)
 
         if _looks_like_direct_media_url(source_url):
             guessed_ext = (
