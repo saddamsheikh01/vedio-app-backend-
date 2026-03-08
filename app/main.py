@@ -114,9 +114,9 @@ def _format_selector(format_name: str) -> str:
     return "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/best[ext=mp4]/best"
 
 
-def _extract(url: str, format_name: str) -> dict[str, Any]:
+def _extract(url: str, format_name: str, *, use_relaxed_profile: bool = False) -> dict[str, Any]:
     ydl_opts = _base_ydl_opts()
-    ydl_opts["format"] = _format_selector(format_name)
+    ydl_opts["format"] = "best" if use_relaxed_profile else _format_selector(format_name)
 
     with YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
@@ -137,23 +137,22 @@ def _extract_with_fallback(url: str, format_name: str) -> tuple[dict[str, Any], 
     elif format_name == "mp3":
         fallback_order.append("mp4")
 
-    last_error: Exception | None = None
+    last_error_message = "Failed to extract media metadata."
     for candidate in fallback_order:
         if candidate in tried:
             continue
         tried.append(candidate)
-        try:
-            return _extract(url, candidate), candidate
-        except HTTPException as exc:
-            last_error = exc
-            continue
-        except Exception as exc:  # noqa: BLE001
-            last_error = exc
-            continue
+        for relaxed in (False, True):
+            try:
+                return _extract(url, candidate, use_relaxed_profile=relaxed), candidate
+            except HTTPException as exc:
+                last_error_message = str(exc.detail) if getattr(exc, "detail", None) else str(exc)
+                continue
+            except Exception as exc:  # noqa: BLE001
+                last_error_message = str(exc)
+                continue
 
-    if isinstance(last_error, HTTPException):
-        raise last_error
-    raise HTTPException(status_code=422, detail="Failed to extract media metadata.")
+    raise HTTPException(status_code=422, detail=last_error_message)
 
 
 def _resolve_media_url(info: dict[str, Any], format_name: str) -> tuple[str, str]:
